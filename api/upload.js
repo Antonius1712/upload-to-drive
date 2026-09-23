@@ -86,7 +86,7 @@ function parseMultipart(req) {
 /**
  * POST /api/upload
  *  - multipart/form-data: each file is uploaded as-is (other form fields -> saved as JSON if no files)
- *  - application/json:    body saved as a .json file
+ *  - application/json:    { filename, base64, mimeType? } -> decoded file; any other body saved as a .json file
  *  - anything else:       raw body saved as-is
  * Optional query params: ?filename=name.ext&folderId=<override>
  * Auth header: x-api-key: <API_KEY>
@@ -103,7 +103,11 @@ async function handler(req, res) {
     return res.status(500).json({ error: 'GOOGLE_DRIVE_FOLDER_ID is not configured' });
   }
 
-  const folderId = req.query.folderId || GOOGLE_DRIVE_FOLDER_ID;
+  // Accept a bare ID or a pasted folder URL (drops "/folders/" prefix and "?hl=..." suffix).
+  const folderId = String(req.query.folderId || GOOGLE_DRIVE_FOLDER_ID)
+    .trim()
+    .replace(/^.*\/folders\//, '')
+    .split(/[?#/]/)[0];
   const contentType = (req.headers['content-type'] || '').toLowerCase();
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
@@ -123,8 +127,21 @@ async function handler(req, res) {
           : [];
     } else {
       const body = await readRawBody(req);
-      if (body.length) {
-        const isJson = contentType.includes('application/json');
+      const isJson = contentType.includes('application/json');
+      let json;
+      if (isJson) {
+        try { json = JSON.parse(body.toString('utf8')); } catch { json = null; }
+      }
+
+      if (json && typeof json.base64 === 'string' && json.filename) {
+        // { filename, base64, mimeType? } -> decoded file (data: URL prefix allowed)
+        const b64 = json.base64.replace(/^data:[^,]*,/, '');
+        items = [{
+          name: json.filename,
+          mimeType: json.mimeType || (/\.pdf$/i.test(json.filename) ? 'application/pdf' : 'application/octet-stream'),
+          buffer: Buffer.from(b64, 'base64'),
+        }];
+      } else if (body.length) {
         items = [{
           name: req.query.filename || `data-${timestamp}.${isJson ? 'json' : contentType.startsWith('text/') ? 'txt' : 'bin'}`,
           mimeType: contentType.split(';')[0] || 'application/octet-stream',
