@@ -86,9 +86,10 @@ function parseMultipart(req) {
 /**
  * POST /api/upload
  *  - multipart/form-data: each file is uploaded as-is (other form fields -> saved as JSON if no files)
- *  - application/json:    { filename, base64, mimeType? } -> decoded file; any other body saved as a .json file
+ *  - application/json:    { filename, base64, mimeType?, folderId? } -> decoded file; any other body saved as a .json file
  *  - anything else:       raw body saved as-is
- * Optional query params: ?filename=name.ext&folderId=<override>
+ * Folder: body folderId (JSON or form field), else ?folderId=, else GOOGLE_DRIVE_FOLDER_ID
+ * Optional query params: ?filename=name.ext&folderId=<id>
  * Auth header: x-api-key: <API_KEY>
  */
 async function handler(req, res) {
@@ -99,23 +100,16 @@ async function handler(req, res) {
   if (!API_KEY || req.headers['x-api-key'] !== API_KEY) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (!GOOGLE_DRIVE_FOLDER_ID) {
-    return res.status(500).json({ error: 'GOOGLE_DRIVE_FOLDER_ID is not configured' });
-  }
-
-  // Accept a bare ID or a pasted folder URL (drops "/folders/" prefix and "?hl=..." suffix).
-  const folderId = String(req.query.folderId || GOOGLE_DRIVE_FOLDER_ID)
-    .trim()
-    .replace(/^.*\/folders\//, '')
-    .split(/[?#/]/)[0];
   const contentType = (req.headers['content-type'] || '').toLowerCase();
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
   try {
     let items;
+    let bodyFolderId;
 
     if (contentType.startsWith('multipart/form-data')) {
       const { files, fields } = await parseMultipart(req);
+      bodyFolderId = fields.folderId;
       items = files.length
         ? files.map((f) => ({ ...f, name: f.name || `upload-${timestamp}` }))
         : Object.keys(fields).length
@@ -134,7 +128,8 @@ async function handler(req, res) {
       }
 
       if (json && typeof json.base64 === 'string' && json.filename) {
-        // { filename, base64, mimeType? } -> decoded file (data: URL prefix allowed)
+        // { filename, base64, mimeType?, folderId? } -> decoded file (data: URL prefix allowed)
+        bodyFolderId = json.folderId;
         const b64 = json.base64.replace(/^data:[^,]*,/, '');
         items = [{
           name: json.filename,
@@ -154,6 +149,16 @@ async function handler(req, res) {
 
     if (!items.length) {
       return res.status(400).json({ error: 'No data received' });
+    }
+
+    // Body folderId > ?folderId= > GOOGLE_DRIVE_FOLDER_ID.
+    // Accepts a bare ID or a pasted folder URL (drops "/folders/" prefix and "?hl=..." suffix).
+    const folderId = String(bodyFolderId || req.query.folderId || GOOGLE_DRIVE_FOLDER_ID || '')
+      .trim()
+      .replace(/^.*\/folders\//, '')
+      .split(/[?#/]/)[0];
+    if (!folderId) {
+      return res.status(400).json({ error: 'folderId is required (or set GOOGLE_DRIVE_FOLDER_ID)' });
     }
 
     const uploaded = [];
